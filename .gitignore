@@ -1,0 +1,8 @@
+# Secrets (templates stay versioned)
+secrets.*.env
+!secrets.env.example
+
+# Generated artifacts
+exports/
+.runtime/
+backups/

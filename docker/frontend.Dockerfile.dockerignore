@@ -1,0 +1,12 @@
+node_modules
+dist
+.angular
+.git
+.cursor
+.vscode
+.history
+coverage
+docs
+openspec
+terra_cogitia_le_grand_livre
+**/*.log

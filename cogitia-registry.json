@@ -1,0 +1,92 @@
+{
+  "version": "1.0",
+  "description": "Terra-Cogitia - deployment registry (non-secret configuration only). Secrets live in secrets.<env>.env, see secrets.env.example.",
+  "project": "Terra-Cogitia",
+  "compose_project": "cogitia",
+  "network_name": "NetCogitia",
+  "image_label": "com.terra-cogitia.project=cogitia",
+  "image_tag": "latest",
+  "paths": {
+    "docker_dir": "docker",
+    "remote_dir": "remote",
+    "export_dir": "exports",
+    "runtime_dir": ".runtime",
+    "backup_dir": "backups"
+  },
+  "database": {
+    "name": "terracogitia",
+    "user": "postgres"
+  },
+  "services": {
+    "database": {
+      "container_name": "Cogitia-Database",
+      "alias": "cogitia-database",
+      "image_name": "cogitia-database",
+      "dockerfile": "docker/database.Dockerfile",
+      "build_context": "../terracogitia_backend/data",
+      "container_port": 5432,
+      "volume": "cogitia-database-data",
+      "required_files": ["schema.sql", "data.sql"]
+    },
+    "backend": {
+      "container_name": "Cogitia-BackEnd",
+      "alias": "cogitia-backend",
+      "image_name": "cogitia-backend",
+      "dockerfile": "docker/backend.Dockerfile",
+      "build_context": "../terracogitia_backend",
+      "port": 8201,
+      "container_port": 8201,
+      "volume": "cogitia-backend-data",
+      "health_path": "/openapi.json",
+      "db_check_path": "/disciplines/all_disciplines",
+      "required_files": ["main.py", "config.py", "database.py", "requirements.txt"]
+    },
+    "frontend": {
+      "container_name": "Cogitia-FrontEnd",
+      "alias": "cogitia-frontend",
+      "image_name": "cogitia-frontend",
+      "dockerfile": "docker/frontend.Dockerfile",
+      "build_context": "../terracogitia_frontend",
+      "port": 8200,
+      "container_port": 8200,
+      "health_path": "/healthz",
+      "required_files": ["package.json", "package-lock.json", "angular.json", "src/index.html", "src/assets/env.js"]
+    }
+  },
+  "environments": {
+    "local": {
+      "secrets_file": "secrets.local.env",
+      "bind_address": "127.0.0.1",
+      "frontend_url": "http://localhost:8200",
+      "api_base_url": "http://localhost:8201",
+      "cors_origins": [
+        "http://localhost:8200",
+        "http://127.0.0.1:8200",
+        "http://localhost:4200",
+        "http://127.0.0.1:4200"
+      ]
+    },
+    "production": {
+      "secrets_file": "secrets.prod.env",
+      "bind_address": "0.0.0.0",
+      "server": {
+        "host": "95.217.14.18",
+        "user": "root",
+        "deploy_dir": "/root/cogitia"
+      },
+      "domains": {
+        "app": "app.terra-cogitia.com",
+        "api": "api.terra-cogitia.com"
+      },
+      "certificate": {
+        "cert_name": "app.terra-cogitia.com"
+      },
+      "frontend_url": "https://app.terra-cogitia.com",
+      "api_base_url": "https://api.terra-cogitia.com",
+      "cors_origins": [
+        "https://app.terra-cogitia.com",
+        "http://95.217.14.18:8200"
+      ]
+    }
+  }
+}

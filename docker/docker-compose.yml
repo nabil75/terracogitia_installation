@@ -1,0 +1,78 @@
+# Terra-Cogitia - runtime stack, identical for local Docker Desktop and Hetzner.
+#
+# Every value comes from cogitia.env, generated from cogitia-registry.json by the
+# Installation scripts. Secrets are injected from secrets/*.env (chmod 600 on the
+# server, never committed). Images are built by the scripts, never by compose.
+#
+# Run through the scripts (deploy-local.ps1 / cogitia-remote.sh), which pass:
+#   -p <compose_project> --project-directory <runtime dir> --env-file cogitia.env
+
+name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME is required}
+
+services:
+  database:
+    image: ${DATABASE_IMAGE:?DATABASE_IMAGE is required}
+    container_name: ${DATABASE_CONTAINER:?DATABASE_CONTAINER is required}
+    restart: unless-stopped
+    env_file:
+      - secrets/database.env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+    volumes:
+      - database-data:/var/lib/postgresql/data
+    networks:
+      cogitia:
+        aliases:
+          - ${DATABASE_ALIAS:?DATABASE_ALIAS is required}
+    # No published port: PostgreSQL is reachable only from NetCogitia.
+
+  backend:
+    image: ${BACKEND_IMAGE:?BACKEND_IMAGE is required}
+    container_name: ${BACKEND_CONTAINER:?BACKEND_CONTAINER is required}
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    env_file:
+      - secrets/backend.env
+    environment:
+      DB_HOST: ${DATABASE_ALIAS}
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
+      APP_DATA_DIR: /data
+    ports:
+      - "${BIND_ADDRESS:?BIND_ADDRESS is required}:${BACKEND_PORT:?BACKEND_PORT is required}:8201"
+    volumes:
+      - backend-data:/data
+    networks:
+      cogitia:
+        aliases:
+          - ${BACKEND_ALIAS:?BACKEND_ALIAS is required}
+
+  frontend:
+    image: ${FRONTEND_IMAGE:?FRONTEND_IMAGE is required}
+    container_name: ${FRONTEND_CONTAINER:?FRONTEND_CONTAINER is required}
+    restart: unless-stopped
+    environment:
+      # URL the BROWSER uses to reach the Back-End (the SPA calls the API directly).
+      API_BASE_URL: ${API_BASE_URL:?API_BASE_URL is required}
+    ports:
+      - "${BIND_ADDRESS}:${FRONTEND_PORT:?FRONTEND_PORT is required}:8200"
+    networks:
+      cogitia:
+        aliases:
+          - ${FRONTEND_ALIAS:?FRONTEND_ALIAS is required}
+
+volumes:
+  database-data:
+    name: ${DATABASE_VOLUME:?DATABASE_VOLUME is required}
+  backend-data:
+    name: ${BACKEND_VOLUME:?BACKEND_VOLUME is required}
+
+networks:
+  cogitia:
+    name: ${NETWORK_NAME:?NETWORK_NAME is required}
+    external: true
