@@ -96,7 +96,7 @@ script validates it and stops with an explicit error when a mandatory value is m
 
 | File | Keys | Notes |
 |---|---|---|
-| `secrets.local.env` | `POSTGRES_PASSWORD` (req.), `MISTRAL_API_KEY` | Auto-created on the first `deploy-local.ps1` with a random DB password |
+| `secrets.local.env` | `POSTGRES_PASSWORD` (req.), `MISTRAL_API_KEY` | Create **once** from `secrets.env.example`, then copy the **same file** to every machine (git-ignored: a clone never brings it). Never auto-generated |
 | `secrets.prod.env` | `POSTGRES_PASSWORD`, `MISTRAL_API_KEY` (both req.) | Create from `secrets.env.example`; never auto-generated |
 
 Optional: `MISTRAL_MODEL`, `OPENAI_API_KEY`. `POSTGRES_PASSWORD` only takes effect when the

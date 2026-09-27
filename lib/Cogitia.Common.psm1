@@ -456,7 +456,12 @@ function Get-CogitiaContainerState {
 }
 
 function Wait-CogitiaHealthy {
-    param([Parameter(Mandatory)][string[]]$Containers, [int]$TimeoutSec = 300)
+    <#
+        -FatalLogPattern: fail immediately (instead of waiting for the timeout) when a container
+        that is restarting or unhealthy logs this regex. The error message starts with
+        "FATAL-LOG <container>:" so callers can recognise it.
+    #>
+    param([Parameter(Mandatory)][string[]]$Containers, [int]$TimeoutSec = 300, [string]$FatalLogPattern)
 
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $lastReport = ''
@@ -467,6 +472,12 @@ function Wait-CogitiaHealthy {
         if ($pending.Count -eq 0) {
             Write-CogitiaOk "All containers healthy: $($Containers -join ', ')"
             return
+        }
+        if ($FatalLogPattern) {
+            foreach ($c in @($pending | Where-Object { $states[$_] -match '^restarting|unhealthy$|^exited' })) {
+                $logs = (Invoke-CogitiaNative docker @('logs', '--tail', '60', $c) -AllowFailure -Quiet).Output -join "`n"
+                if ($logs -match $FatalLogPattern) { throw "FATAL-LOG ${c}: $($Matches[0])" }
+            }
         }
         $report = ($pending | ForEach-Object { "$_=$($states[$_])" }) -join '  '
         if ($report -ne $lastReport) { Write-CogitiaInfo "waiting: $report"; $lastReport = $report }

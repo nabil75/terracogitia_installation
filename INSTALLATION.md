@@ -39,17 +39,20 @@ and the data is kept.
 | `-SkipBuild` | off | Reuse the existing images (fails if they don't exist) |
 | `-SkipBackup` | off | Don't back up the database before redeploying |
 | `-HealthTimeoutSec <30-1800>` | `300` | How long to wait for the containers to become healthy |
+| `-SyncDbPassword` | off | Set the database password to the one in `secrets.local.env`, **keeping the data** (fixes "password authentication failed") |
 
 ```powershell
 .\deploy-local.ps1               # build + deploy + verify (first run ~5 min)
 .\deploy-local.ps1 -SkipBuild    # redeploy existing images, e.g. after a secrets change (~20 s)
 .\deploy-local.ps1 -NoCache      # clean rebuild
+.\deploy-local.ps1 -SyncDbPassword   # database password differs from secrets.local.env (data kept)
 ```
 
 It checks prerequisites, builds the 3 images, generates `.runtime\local\`, backs up the database to
 `backups\local\` (last 5 kept), creates `NetCogitia`, runs `docker compose up`, waits until all containers
-are healthy, runs 13 verification checks, and removes dangling Terra-Cogitia images. On the first run it
-creates `secrets.local.env` with a random database password.
+are healthy, runs 13 verification checks, and removes dangling Terra-Cogitia images.
+
+**`secrets.local.env` is required**: create it once from `secrets.env.example`, then copy the same file to every machine. Before starting the Back-End, the script checks that the database accepts its `POSTGRES_PASSWORD` and stops within seconds if not.
 
 ### `clean-all-local.ps1`
 

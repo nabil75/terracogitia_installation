@@ -28,6 +28,11 @@
 .PARAMETER HealthTimeoutSec
     Maximum wait for healthy containers (default 300).
 
+.PARAMETER SyncDbPassword
+    Set the database's password to POSTGRES_PASSWORD from secrets.local.env, keeping all data.
+    Use when the Back-End fails with "password authentication failed": the database volume
+    was created with an earlier password (e.g. secrets.local.env was lost or regenerated).
+
 .PARAMETER RegistryPath
     Alternative registry file (default: cogitia-registry.json next to this script).
 
@@ -35,6 +40,7 @@
     .\deploy-local.ps1
     .\deploy-local.ps1 -NoCache
     .\deploy-local.ps1 -SkipBuild
+    .\deploy-local.ps1 -SyncDbPassword    # fix a password mismatch, data kept
 #>
 
 [CmdletBinding()]
@@ -42,6 +48,7 @@ param(
     [switch]$NoCache,
     [switch]$SkipBuild,
     [switch]$SkipBackup,
+    [switch]$SyncDbPassword,
     [ValidateRange(30, 1800)][int]$HealthTimeoutSec = 300,
     [string]$RegistryPath
 )
@@ -77,6 +84,56 @@ function Backup-LocalDatabase {
     Get-ChildItem $backupDir -Filter 'cogitia_*.dump' | Sort-Object LastWriteTime -Descending | Select-Object -Skip 5 | Remove-Item -Force
 }
 
+function Get-PasswordMismatchHelp {
+    $f = $envCfg.secrets_file
+    return "The database volume '$($registry.services.database.volume)' was created with a different POSTGRES_PASSWORD than the one in $f " +
+           "(PostgreSQL keeps the password it was first created with; use the same $f on every machine).`n" +
+           "    Fix, keeping the data:     .\deploy-local.ps1 -SyncDbPassword`n" +
+           "    Or restore the previous POSTGRES_PASSWORD in $f`n" +
+           "    Or reset to the seed data: .\clean-all-local.ps1 -PurgeData ; .\deploy-local.ps1"
+}
+
+function Invoke-DbShell {
+    <#
+        Runs a sh command with $InputText on stdin (keeps secrets off command lines), either
+        inside the database container (-Exec) or in a throwaway container on NetCogitia.
+    #>
+    param([string]$InputText, [string]$Command, [string[]]$ShArgs, [switch]$Exec)
+    $target = if ($Exec) { @('exec', '-i', $registry.services.database.container_name) }
+              else { @('run', '--rm', '-i', '--network', $registry.network_name, '--entrypoint', 'sh', "$($registry.services.database.image_name):$($registry.image_tag)") }
+    $shell = if ($Exec) { @('sh', '-c', $Command) } else { @('-c', $Command) }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = $InputText | & docker @target @shell @ShArgs 2>&1
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = @($out | ForEach-Object { "$_" }) }
+    } finally { $ErrorActionPreference = $previous }
+}
+
+function Test-LocalDbPassword {
+    <#
+        True when POSTGRES_PASSWORD authenticates over NetCogitia, exactly like the Back-End.
+        (Inside the database container 127.0.0.1 is trusted, so a check there proves nothing.)
+        PowerShell pipes a CRLF to native stdin: the CR is stripped before use.
+    #>
+    $r = Invoke-DbShell $secrets['POSTGRES_PASSWORD'] 'PGPASSWORD=$(head -n 1 | tr -d \\r) && export PGPASSWORD && exec psql -h $0 -U $1 -d $2 -f /dev/null' `
+        @($registry.services.database.alias, $registry.database.user, $registry.database.name)
+    return $r.ExitCode -eq 0
+}
+
+function Sync-LocalDbPassword {
+    $db = $registry.services.database
+    Write-CogitiaStep "Setting the $($db.container_name) password from $($envCfg.secrets_file) (data kept)"
+    Invoke-LocalCompose @('up', '-d', 'database')
+    Wait-CogitiaHealthy -Containers @($db.container_name) -TimeoutSec $HealthTimeoutSec
+    # Local socket connections are trusted inside the container: no old password needed.
+    $sql = "ALTER USER `"$($registry.database.user)`" WITH PASSWORD '$($secrets['POSTGRES_PASSWORD'])';"
+    $r = Invoke-DbShell $sql 'exec psql -v ON_ERROR_STOP=1 -q -U $0 -d $1' @($registry.database.user, $registry.database.name) -Exec
+    if ($r.ExitCode -ne 0) { throw "ALTER USER failed: $($r.Output -join ' ')" }
+    if (-not (Test-LocalDbPassword)) { throw "Password still rejected after ALTER USER" }
+    Write-CogitiaOk "Database password aligned with $($envCfg.secrets_file)"
+}
+
 $exitCode = 0
 $overallStart = Get-Date
 try {
@@ -92,14 +149,13 @@ try {
     Write-CogitiaOk 'Sources, Dockerfiles and compose file present'
 
     $secretsPath = Resolve-CogitiaPath $registry $envCfg.secrets_file
+    # The password is set ONCE by you, in one secrets.local.env that you copy to every machine
+    # (it is git-ignored, so it never comes with a clone). Never generated: a per-machine random
+    # password is exactly what made machines disagree.
     if (-not (Test-Path $secretsPath)) {
-        # Local convenience only: generate a local DB password once. Production never auto-generates.
-        Write-CogitiaWarn "$($envCfg.secrets_file) not found -- creating it with a generated local POSTGRES_PASSWORD"
-        Write-CogitiaLfFile $secretsPath @(
-            '# Terra-Cogitia local secrets (generated by deploy-local.ps1, git-ignored).',
-            "POSTGRES_PASSWORD=$(New-CogitiaPassword)",
-            '# Required for AI features (theme/question generation, Discover):',
-            'MISTRAL_API_KEY=')
+        throw "$($envCfg.secrets_file) not found in $(Split-Path -Parent $secretsPath).`n" +
+              "    Copy it from a machine where Terra-Cogitia already runs (same POSTGRES_PASSWORD everywhere),`n" +
+              "    or, the very first time, create it:  Copy-Item secrets.env.example $($envCfg.secrets_file)  and set POSTGRES_PASSWORD."
     }
     $secrets = Read-CogitiaSecrets $secretsPath -Required @('POSTGRES_PASSWORD') -Optional @('MISTRAL_API_KEY', 'MISTRAL_MODEL', 'OPENAI_API_KEY')
     if (-not $secrets['MISTRAL_API_KEY']) {
@@ -155,12 +211,25 @@ try {
         }
     }
 
+    if ($SyncDbPassword) {
+        Sync-LocalDbPassword
+    } elseif ((Get-CogitiaContainerState $registry.services.database.container_name) -eq 'running/healthy') {
+        if (-not (Test-LocalDbPassword)) { throw (Get-PasswordMismatchHelp) }
+        Write-CogitiaOk "Database accepts POSTGRES_PASSWORD from $($envCfg.secrets_file)"
+    }
+
     Write-CogitiaStep 'docker compose up -d (recreates containers whose image or configuration changed)'
     Invoke-LocalCompose @('up', '-d', '--remove-orphans')
 
     # --- Phase 5: Health ---------------------------------------------------------
     Write-CogitiaPhase 'PHASE 5: Health'
-    Wait-CogitiaHealthy -Containers $containers -TimeoutSec $HealthTimeoutSec
+    try {
+        Wait-CogitiaHealthy -Containers $containers -TimeoutSec $HealthTimeoutSec -FatalLogPattern 'password authentication failed'
+    } catch {
+        $beLogs = (Invoke-CogitiaNative docker @('logs', '--tail', '100', $registry.services.backend.container_name) -AllowFailure -Quiet).Output -join "`n"
+        if ($beLogs -match 'password authentication failed') { throw (Get-PasswordMismatchHelp) }
+        throw
+    }
 
     # --- Phase 6: Verification ---------------------------------------------------
     Write-CogitiaPhase 'PHASE 6: Verification'
