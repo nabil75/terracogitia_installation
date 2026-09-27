@@ -226,6 +226,7 @@ certbot's own systemd timer still renews automatically; this script is the expli
 | Symptom | Cause / fix |
 |---|---|
 | `Docker engine is not reachable` | Start Docker Desktop. |
+| `Cogitia-FrontEnd` restarting, logs show `40-cogitia-env.sh: not found` | The script was checked out with Windows line endings (Git `core.autocrlf=true`). Fixed in the image (CR stripped at build) and in `.gitattributes` (LF forced for new checkouts). On the affected machine: pull, then run `deploy-local.ps1` again. |
 | `Cogitia-BackEnd` unhealthy, logs show `password authentication failed` | `POSTGRES_PASSWORD` changed after the volume was created. Restore the old value, or `docker exec -it Cogitia-Database psql -U postgres -c "ALTER USER postgres PASSWORD '<new>'"`. |
 | Backend logs `DB_PASSWORD manquant` | `secrets/backend.env` missing; rerun the deploy script. |
 | Page loads but API calls fail (browser console: CORS) | Add the page origin to `cors_origins` in the registry and redeploy. |

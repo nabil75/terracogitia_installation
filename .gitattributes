@@ -1,0 +1,13 @@
+# Files executed or read on Linux (containers, Hetzner) must keep LF line endings,
+# whatever core.autocrlf is set to on the Windows machine that checks them out.
+# A CRLF shebang ("#!/bin/sh\r") makes Linux report the script as "not found".
+*.sh            text eol=lf
+*.template      text eol=lf
+*.conf          text eol=lf
+*.yml           text eol=lf
+*.Dockerfile    text eol=lf
+*.dockerignore  text eol=lf
+
+# Windows-side files
+*.ps1           text eol=crlf
+*.psm1          text eol=crlf
