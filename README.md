@@ -134,7 +134,7 @@ label-scoped removal of dangling Cogitia images. Idempotent: re-running converge
 state.
 
 Verification: Front-End health/SPA/runtime API URL, Back-End OpenAPI, a **database-backed**
-endpoint (`/disciplines/all_disciplines`), the **CORS preflight** the browser performs, all
+endpoint (`/disciplines/db_check`), the **CORS preflight** the browser performs, all
 three containers on `NetCogitia`, FrontEnd→BackEnd and BackEnd→Database by container DNS,
 restart policy `unless-stopped`, database not published.
 
