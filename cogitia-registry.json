@@ -38,7 +38,7 @@
       "container_port": 8201,
       "volume": "cogitia-backend-data",
       "health_path": "/openapi.json",
-      "db_check_path": "/disciplines/all_disciplines",
+      "db_check_path": "/disciplines/db_check",
       "required_files": ["main.py", "config.py", "database.py", "requirements.txt"]
     },
     "frontend": {

@@ -9,6 +9,7 @@ for troubleshooting and background, see [README.md](README.md).
 | Script | Target | Purpose |
 |---|---|---|
 | [`deploy-local.ps1`](#deploy-localps1) | Your PC (Docker Desktop) | Build and (re)deploy the three containers, then verify |
+| [`db-access.ps1`](#db-accessps1) | Your PC | Browse the local PostgreSQL (Adminer UI, `psql`, or TCP tunnel) |
 | [`clean-all-local.ps1`](#clean-all-localps1) | Your PC | Remove the local deployment |
 | [`deploy-all.ps1`](#deploy-allps1) | Hetzner | Build → export → transfer → deploy → verify |
 | [`update-secrets.ps1`](#update-secretsps1) | Hetzner | Apply an API-key change without redeploying |
@@ -26,6 +27,31 @@ Common to every script:
 ---
 
 ## Local (Docker Desktop)
+
+### `db-access.ps1`
+
+Opens a practical local access to `Cogitia-Database` (PostgreSQL is not published on the host).
+
+| Parameter | Default | Effect |
+|---|---|---|
+| *(none)* | Adminer | Starts Adminer on http://127.0.0.1:8210 and opens the browser |
+| `-Shell` | off | Interactive `psql` inside the database container |
+| `-Tunnel` | off | Exposes `127.0.0.1:15432` for DBeaver / pgAdmin / etc. |
+| `-Stop` | off | Stops Adminer and the tunnel helpers |
+| `-Port` | `8210` | Local Adminer port |
+| `-TunnelPort` | `15432` | Local tunnel port (5432/5433 often unavailable on Windows/Docker) |
+| `-NoBrowser` | off | Do not open the browser |
+
+```powershell
+.\db-access.ps1              # Adminer UI
+.\db-access.ps1 -Shell       # psql
+.\db-access.ps1 -Tunnel      # TCP for a desktop client
+.\db-access.ps1 -Stop
+```
+
+Adminer / tunnel login: System **PostgreSQL**, Server **`cogitia-database`** (Adminer) or Host
+**`127.0.0.1`** port **`15432`** (tunnel), Database **`terracogitia`**, User **`postgres`**, Password =
+`POSTGRES_PASSWORD` in `secrets.local.env`.
 
 ### `deploy-local.ps1`
 
