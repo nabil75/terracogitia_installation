@@ -27,6 +27,36 @@ services:
           - ${DATABASE_ALIAS:?DATABASE_ALIAS is required}
     # No published port: PostgreSQL is reachable only from NetCogitia.
 
+  models:
+    # Open-weight models (Laya decision model, Whisper STT) served to the Back-End over HTTP.
+    image: ${MODELS_IMAGE:?MODELS_IMAGE is required}
+    container_name: ${MODELS_CONTAINER:?MODELS_CONTAINER is required}
+    restart: unless-stopped
+    env_file:
+      - secrets/models.env
+    networks:
+      cogitia:
+        aliases:
+          - ${MODELS_ALIAS:?MODELS_ALIAS is required}
+    # No published port: reachable only from NetCogitia (like the database).
+
+  voice:
+    # OPTIONAL (profile « voice », on in the environments listing it in optional_services): text-to-speech with voice
+    # cloning (VibeVoice-1.5B). Separate from Models so a slow synthesis never delays Laya or Whisper.
+    profiles: ["voice"]
+    image: ${VOICE_IMAGE:?VOICE_IMAGE is required}
+    container_name: ${VOICE_CONTAINER:?VOICE_CONTAINER is required}
+    restart: unless-stopped
+    env_file:
+      - secrets/voice.env
+    cpus: ${VOICE_CPUS:?VOICE_CPUS is required}
+    mem_limit: ${VOICE_MEMORY:?VOICE_MEMORY is required}
+    networks:
+      cogitia:
+        aliases:
+          - ${VOICE_ALIAS:?VOICE_ALIAS is required}
+    # No published port: reachable only from NetCogitia.
+
   backend:
     image: ${BACKEND_IMAGE:?BACKEND_IMAGE is required}
     container_name: ${BACKEND_CONTAINER:?BACKEND_CONTAINER is required}
@@ -43,6 +73,11 @@ services:
       DB_USER: ${POSTGRES_USER}
       CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
       APP_DATA_DIR: /data
+      # AI layer: Cogitia-Models base URL (seeds the « Cogitia-Models » providers of the AI registry).
+      AI_MODELS_URL: http://${MODELS_ALIAS}:${MODELS_PORT:?MODELS_PORT is required}/v1
+      # Optional Cogitia-Voice (cloned voices): URL of the « cogitia-voice » provider; ENABLED seeds it active.
+      AI_VOICE_URL: http://${VOICE_ALIAS}:${VOICE_PORT:?VOICE_PORT is required}/v1
+      AI_VOICE_ENABLED: ${VOICE_ENABLED:-0}
     ports:
       - "${BIND_ADDRESS:?BIND_ADDRESS is required}:${BACKEND_PORT:?BACKEND_PORT is required}:8201"
     volumes:
@@ -51,6 +86,39 @@ services:
       cogitia:
         aliases:
           - ${BACKEND_ALIAS:?BACKEND_ALIAS is required}
+
+  worker:
+    # Media jobs (uploads, bank imports, AI generation calls, ffmpeg composition), pulled from the
+    # PostgreSQL queue. Same code and secrets as the Back-End; scales by replicas (FOR UPDATE SKIP LOCKED).
+    image: ${WORKER_IMAGE:?WORKER_IMAGE is required}
+    container_name: ${WORKER_CONTAINER:?WORKER_CONTAINER is required}
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    env_file:
+      - secrets/backend.env
+    environment:
+      DB_HOST: ${DATABASE_ALIAS}
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      APP_DATA_DIR: /data
+      AI_MODELS_URL: http://${MODELS_ALIAS}:${MODELS_PORT}/v1
+      AI_VOICE_URL: http://${VOICE_ALIAS}:${VOICE_PORT}/v1
+      AI_VOICE_ENABLED: ${VOICE_ENABLED:-0}
+      MEDIA_WORKER_POOLS: ${WORKER_POOLS:?WORKER_POOLS is required}
+    cpus: ${WORKER_CPUS:?WORKER_CPUS is required}
+    stop_grace_period: 40s
+    volumes:
+      - backend-data:/data
+    networks:
+      cogitia:
+        aliases:
+          - ${WORKER_ALIAS:?WORKER_ALIAS is required}
+    # No published port: the worker only makes outbound calls.
 
   frontend:
     image: ${FRONTEND_IMAGE:?FRONTEND_IMAGE is required}

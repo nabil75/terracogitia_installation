@@ -142,6 +142,7 @@ try {
     # --- Phase 1: Prerequisites ------------------------------------------------
     Write-CogitiaPhase 'PHASE 1: Prerequisites'
     $registry = if ($RegistryPath) { Get-CogitiaRegistry -Path $RegistryPath } else { Get-CogitiaRegistry }
+    Set-CogitiaActiveEnvironment $registry 'local'
     $envCfg = Get-CogitiaEnvironment $registry 'local'
     $docker = Assert-CogitiaDocker -RequireBuildx:(-not $SkipBuild)
     Write-CogitiaOk "Docker engine $($docker.Engine), compose $($docker.Compose)"
@@ -157,7 +158,7 @@ try {
               "    Copy it from a machine where Terra-Cogitia already runs (same POSTGRES_PASSWORD everywhere),`n" +
               "    or, the very first time, create it:  Copy-Item secrets.env.example $($envCfg.secrets_file)  and set POSTGRES_PASSWORD."
     }
-    $secrets = Read-CogitiaSecrets $secretsPath -Required @('POSTGRES_PASSWORD') -Optional @('MISTRAL_API_KEY', 'MISTRAL_MODEL', 'OPENAI_API_KEY')
+    $secrets = Read-CogitiaSecrets $secretsPath -Required @('POSTGRES_PASSWORD') -Optional @('MISTRAL_API_KEY', 'MISTRAL_MODEL', 'OPENAI_API_KEY', 'MODELS_API_TOKEN', 'AUTH_SECRET', 'PEXELS_API_KEY', 'OPENVERSE_TOKEN')
     if (-not $secrets['MISTRAL_API_KEY']) {
         Write-CogitiaWarn "MISTRAL_API_KEY empty in $($envCfg.secrets_file): the stack runs, AI generation endpoints will fail"
     }
@@ -250,12 +251,32 @@ try {
     $dbNet = Invoke-CogitiaNative docker @('exec', $svc.backend.container_name, 'python', '-c', "import socket; socket.create_connection(('$($svc.database.alias)', $($svc.database.container_port)), 5)") -AllowFailure -Quiet
     $checks += New-CogitiaCheck 'Back-End -> Database via NetCogitia DNS' ($dbNet.ExitCode -eq 0) "$($svc.database.alias):$($svc.database.container_port)"
 
+    $modelsUrl = "http://$($svc.models.alias):$($svc.models.container_port)$($svc.models.health_path)"
+    $modelsNet = Invoke-CogitiaNative docker @('exec', $svc.backend.container_name, 'python', '-c', "import urllib.request; urllib.request.urlopen('$modelsUrl', timeout=10)") -AllowFailure -Quiet
+    $checks += New-CogitiaCheck 'Back-End -> Models via NetCogitia DNS' ($modelsNet.ExitCode -eq 0) $modelsUrl
+
     foreach ($c in $containers) {
         $policy = (Invoke-CogitiaNative docker @('container', 'inspect', '-f', '{{.HostConfig.RestartPolicy.Name}}', $c) -Quiet).Output -join ''
         $checks += New-CogitiaCheck "Restart policy $c" ($policy -eq 'unless-stopped') $policy
     }
     $dbPorts = (Invoke-CogitiaNative docker @('port', $svc.database.container_name) -AllowFailure -Quiet).Output -join ' '
     $checks += New-CogitiaCheck 'Database not published on host' ([string]::IsNullOrWhiteSpace($dbPorts)) $(if ($dbPorts) { $dbPorts } else { 'internal only' })
+    $modelsPorts = (Invoke-CogitiaNative docker @('port', $svc.models.container_name) -AllowFailure -Quiet).Output -join ' '
+    $checks += New-CogitiaCheck 'Models not published on host' ([string]::IsNullOrWhiteSpace($modelsPorts)) $(if ($modelsPorts) { $modelsPorts } else { 'internal only' })
+
+    if (Test-CogitiaServiceEnabled $registry 'voice') {
+        $voiceUrl = "http://$($svc.voice.alias):$($svc.voice.container_port)$($svc.voice.health_path)"
+        $voiceNet = Invoke-CogitiaNative docker @('exec', $svc.backend.container_name, 'python', '-c', "import urllib.request; urllib.request.urlopen('$voiceUrl', timeout=10)") -AllowFailure -Quiet
+        $checks += New-CogitiaCheck 'Back-End -> Voice via NetCogitia DNS' ($voiceNet.ExitCode -eq 0) $voiceUrl
+        $voicePorts = (Invoke-CogitiaNative docker @('port', $svc.voice.container_name) -AllowFailure -Quiet).Output -join ' '
+        $checks += New-CogitiaCheck 'Voice not published on host' ([string]::IsNullOrWhiteSpace($voicePorts)) $(if ($voicePorts) { $voicePorts } else { 'internal only' })
+    }
+    $workerDb = Invoke-CogitiaNative docker @('exec', $svc.worker.container_name, 'python', '-c', "import socket; socket.create_connection(('$($svc.database.alias)', $($svc.database.container_port)), 5)") -AllowFailure -Quiet
+    $checks += New-CogitiaCheck 'Worker -> Database via NetCogitia DNS' ($workerDb.ExitCode -eq 0) "$($svc.database.alias):$($svc.database.container_port)"
+    $workerFfmpeg = Invoke-CogitiaNative docker @('exec', $svc.worker.container_name, 'ffmpeg', '-hide_banner', '-encoders') -AllowFailure -Quiet
+    $checks += New-CogitiaCheck 'Worker ffmpeg (libx264)' (($workerFfmpeg.ExitCode -eq 0) -and (($workerFfmpeg.Output -join ' ') -match 'libx264')) 'media composition'
+    $workerPorts = (Invoke-CogitiaNative docker @('port', $svc.worker.container_name) -AllowFailure -Quiet).Output -join ' '
+    $checks += New-CogitiaCheck 'Worker not published on host' ([string]::IsNullOrWhiteSpace($workerPorts)) $(if ($workerPorts) { $workerPorts } else { 'internal only' })
 
     $failures = Write-CogitiaChecks $checks
     if ($failures -gt 0) { throw "$failures verification check(s) failed" }

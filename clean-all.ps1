@@ -57,7 +57,7 @@ try {
     $stagingDir = Join-Path (Resolve-CogitiaPath $registry $registry.paths.runtime_dir) 'production'
 
     Write-Host "  Server:     $($prod.server.user)@$($prod.server.host):$($prod.server.deploy_dir)" -ForegroundColor Cyan
-    Write-Host "  Containers: $((Get-CogitiaServices $registry | ForEach-Object { $_.Container }) -join ', ')" -ForegroundColor Cyan
+    Write-Host "  Containers: $((Get-CogitiaServices $registry -All | ForEach-Object { $_.Container }) -join ', ')" -ForegroundColor Cyan
     Write-Host "  Network:    $($registry.network_name)" -ForegroundColor Cyan
     Write-Host "  Images:     $(if ($KeepImages) { 'kept' } else { 'removed' })" -ForegroundColor Cyan
     Write-Host "  Volumes:    $(if ($PurgeData) { 'DELETED (after a safety backup)' } else { 'kept' })" -ForegroundColor $(if ($PurgeData) { 'Red' } else { 'Cyan' })

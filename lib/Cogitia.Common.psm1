@@ -16,7 +16,7 @@
 Set-StrictMode -Version Latest
 
 $script:InstallRoot  = Split-Path -Parent $PSScriptRoot
-$script:ServiceOrder = @('database', 'backend', 'frontend')
+$script:ServiceOrder = @('database', 'models', 'voice', 'backend', 'worker', 'frontend')
 
 # PowerShell 5.1 defaults to TLS 1.0 for Invoke-WebRequest.
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -90,9 +90,13 @@ function Get-CogitiaRegistry {
                   'database.name', 'database.user')
     foreach ($svc in $script:ServiceOrder) {
         $required += "services.$svc.container_name", "services.$svc.alias", "services.$svc.image_name",
-                     "services.$svc.dockerfile", "services.$svc.build_context", "services.$svc.container_port"
+                     "services.$svc.dockerfile", "services.$svc.build_context"
+        # The media worker serves no port (it pulls jobs from PostgreSQL).
+        if ($svc -ne 'worker') { $required += "services.$svc.container_port" }
     }
-    $required += 'services.database.volume', 'services.backend.volume',
+    $required += 'services.database.volume', 'services.backend.volume', 'services.models.health_path',
+                 'services.voice.health_path', 'services.voice.cpus', 'services.voice.memory',
+                 'services.worker.pools', 'services.worker.cpus',
                  'services.backend.port', 'services.backend.health_path', 'services.backend.db_check_path',
                  'services.frontend.port', 'services.frontend.health_path'
     Assert-CogitiaSettings $registry $required "registry '$Path'"
@@ -112,10 +116,32 @@ function Resolve-CogitiaPath {
     return [IO.Path]::GetFullPath([IO.Path]::Combine($Registry.InstallRoot, $RelativePath))
 }
 
+function Set-CogitiaActiveEnvironment {
+    <# Records which environment a script deploys, so optional services follow that environment. #>
+    param([Parameter(Mandatory)]$Registry, [Parameter(Mandatory)][ValidateSet('local', 'production')][string]$Name)
+    $Registry | Add-Member -NotePropertyName ActiveEnvironment -NotePropertyValue $Name -Force
+}
+
+function Test-CogitiaServiceEnabled {
+    <#
+        Core services are always on. An optional service ("optional": true, e.g. voice) is on only in the
+        environments that list it in environments.<env>.optional_services (local: yes, production: no).
+    #>
+    param([Parameter(Mandatory)]$Registry, [Parameter(Mandatory)][string]$Name, [string]$EnvironmentName)
+    if (-not [bool](Get-CogitiaValue $Registry.services.$Name 'optional')) { return $true }
+    $envName = if ($EnvironmentName) { $EnvironmentName } else { [string](Get-CogitiaValue $Registry 'ActiveEnvironment') }
+    if (-not $envName) { return $false }
+    return @(Get-CogitiaValue $Registry "environments.$envName.optional_services") -contains $Name
+}
+
 function Get-CogitiaServices {
-    <# Services in dependency order (database, backend, frontend) with resolved paths. #>
-    param([Parameter(Mandatory)]$Registry)
+    <#
+        Services in dependency order (database, models, voice, backend, worker, frontend) with resolved paths.
+        Disabled optional services are left out (not built, exported or waited for) unless -All (clean-up).
+    #>
+    param([Parameter(Mandatory)]$Registry, [switch]$All)
     foreach ($name in $script:ServiceOrder) {
+        if (-not $All -and -not (Test-CogitiaServiceEnabled $Registry $name)) { continue }
         $svc = $Registry.services.$name
         [pscustomobject]@{
             Name          = $name
@@ -125,6 +151,7 @@ function Get-CogitiaServices {
             ImageName     = $svc.image_name
             Dockerfile    = Resolve-CogitiaPath $Registry $svc.dockerfile
             Context       = Resolve-CogitiaPath $Registry $svc.build_context
+            Target        = [string](Get-CogitiaValue $svc 'build_target')
             RequiredFiles = @(Get-CogitiaValue $svc 'required_files' | Where-Object { $_ })
         }
     }
@@ -245,6 +272,21 @@ function Get-CogitiaRuntimeSettings {
         DATABASE_CONTAINER   = $svc.database.container_name
         DATABASE_ALIAS       = $svc.database.alias
         DATABASE_VOLUME      = $svc.database.volume
+        MODELS_IMAGE         = "$($svc.models.image_name):$tag"
+        MODELS_CONTAINER     = $svc.models.container_name
+        MODELS_ALIAS         = $svc.models.alias
+        MODELS_PORT          = $svc.models.container_port
+        MODELS_HEALTH_PATH   = $svc.models.health_path
+        VOICE_ENABLED        = $(if (Test-CogitiaServiceEnabled $Registry 'voice' $EnvironmentName) { '1' } else { '0' })
+        VOICE_IMAGE          = "$($svc.voice.image_name):$tag"
+        VOICE_CONTAINER      = $svc.voice.container_name
+        VOICE_ALIAS          = $svc.voice.alias
+        VOICE_PORT           = $svc.voice.container_port
+        VOICE_HEALTH_PATH    = $svc.voice.health_path
+        VOICE_CPUS           = $svc.voice.cpus
+        VOICE_MEMORY         = $svc.voice.memory
+        # Compose starts the optional "voice" service only when its profile is active.
+        COMPOSE_PROFILES     = $(if (Test-CogitiaServiceEnabled $Registry 'voice' $EnvironmentName) { 'voice' } else { '' })
         BACKEND_IMAGE        = "$($svc.backend.image_name):$tag"
         BACKEND_CONTAINER    = $svc.backend.container_name
         BACKEND_ALIAS        = $svc.backend.alias
@@ -252,6 +294,11 @@ function Get-CogitiaRuntimeSettings {
         BACKEND_PORT         = $svc.backend.port
         BACKEND_HEALTH_PATH  = $svc.backend.health_path
         BACKEND_DB_CHECK_PATH = $svc.backend.db_check_path
+        WORKER_IMAGE         = "$($svc.worker.image_name):$tag"
+        WORKER_CONTAINER     = $svc.worker.container_name
+        WORKER_ALIAS         = $svc.worker.alias
+        WORKER_POOLS         = $svc.worker.pools
+        WORKER_CPUS          = $svc.worker.cpus
         FRONTEND_IMAGE       = "$($svc.frontend.image_name):$tag"
         FRONTEND_CONTAINER   = $svc.frontend.container_name
         FRONTEND_ALIAS       = $svc.frontend.alias
@@ -271,8 +318,9 @@ function Get-CogitiaRuntimeSettings {
 
 function New-CogitiaRuntimeFiles {
     <#
-        Writes <OutDir>/cogitia.env and, when -Secrets is given, <OutDir>/secrets/database.env
-        and <OutDir>/secrets/backend.env. Returns the paths written.
+        Writes <OutDir>/cogitia.env and, when -Secrets is given, <OutDir>/secrets/database.env,
+        <OutDir>/secrets/backend.env, <OutDir>/secrets/models.env and <OutDir>/secrets/voice.env.
+        Returns the paths written.
     #>
     param(
         [Parameter(Mandatory)]$Registry,
@@ -289,13 +337,23 @@ function New-CogitiaRuntimeFiles {
     if ($Secrets) {
         $dbValues = [ordered]@{ POSTGRES_PASSWORD = $Secrets['POSTGRES_PASSWORD'] }
         $beValues = [ordered]@{ DB_PASSWORD = $Secrets['POSTGRES_PASSWORD'] }
-        foreach ($k in @('MISTRAL_API_KEY', 'MISTRAL_MODEL', 'OPENAI_API_KEY')) {
+        foreach ($k in @('MISTRAL_API_KEY', 'MISTRAL_MODEL', 'OPENAI_API_KEY', 'MODELS_API_TOKEN', 'AUTH_SECRET', 'PEXELS_API_KEY', 'OPENVERSE_TOKEN')) {
             if ($Secrets.ContainsKey($k) -and -not [string]::IsNullOrWhiteSpace($Secrets[$k])) { $beValues[$k] = $Secrets[$k] }
+        }
+        # Optional shared token between Back-End and Cogitia-Models (defence in depth on NetCogitia).
+        $modelsValues = [ordered]@{}
+        if ($Secrets.ContainsKey('MODELS_API_TOKEN') -and -not [string]::IsNullOrWhiteSpace($Secrets['MODELS_API_TOKEN'])) {
+            $modelsValues['MODELS_API_TOKEN'] = $Secrets['MODELS_API_TOKEN']
         }
         $result.Database = Join-Path $OutDir 'secrets\database.env'
         $result.Backend  = Join-Path $OutDir 'secrets\backend.env'
+        $result.Models   = Join-Path $OutDir 'secrets\models.env'
+        $result.Voice    = Join-Path $OutDir 'secrets\voice.env'
         Write-CogitiaLfFile $result.Database @(ConvertTo-CogitiaEnvLines $dbValues)
         Write-CogitiaLfFile $result.Backend  @(ConvertTo-CogitiaEnvLines $beValues)
+        Write-CogitiaLfFile $result.Models   (@('# Cogitia-Models secrets (may be empty)') + @(ConvertTo-CogitiaEnvLines $modelsValues))
+        # Cogitia-Voice shares the Models token (same defence in depth); written even when the service is off.
+        Write-CogitiaLfFile $result.Voice    (@('# Cogitia-Voice secrets (may be empty)') + @(ConvertTo-CogitiaEnvLines $modelsValues))
     }
     return [pscustomobject]$result
 }
@@ -401,6 +459,7 @@ function Build-CogitiaImages {
                        '--label', $Registry.image_label,
                        '--label', "com.terra-cogitia.component=$($svc.Name)",
                        '--progress', 'plain')
+        if ($svc.Target) { $buildArgs += '--target', $svc.Target }
         if ($NoCache) { $buildArgs += '--no-cache' }
         $buildArgs += $svc.Context
         Invoke-CogitiaNative docker $buildArgs -DisplayName "docker build ($($svc.Name))" | Out-Null

@@ -23,11 +23,15 @@ shell script, host nginx + certbot for TLS. Every operation is **scoped to Terra
 | Container          | Image              | Port (host) | Role |
 |--------------------|--------------------|-------------|------|
 | `Cogitia-FrontEnd` | `cogitia-frontend` | `8200`      | Angular SPA served by unprivileged nginx |
-| `Cogitia-BackEnd`  | `cogitia-backend`  | `8201`      | FastAPI/uvicorn (Mistral, Whisper CPU) |
+| `Cogitia-BackEnd`  | `cogitia-backend`  | `8201`      | FastAPI/uvicorn (API, AI layer: Mistral, routing, prompts) |
+| `Cogitia-Models`   | `cogitia-models`   | — (internal) | Open-weight models on CPU: Laya (decisions), Whisper (speech-to-text) |
+| `Cogitia-Worker`   | `cogitia-worker`   | — (internal) | Media jobs (uploads, transcoding, imports, generation calls, ffmpeg composition) |
+| `Cogitia-Voice`    | `cogitia-voice`    | — (internal) | **Optional, off by default.** Cloned voices for narrations (VibeVoice-1.5B, MIT) |
 | `Cogitia-Database` | `cogitia-database` | — (internal) | PostgreSQL 17, seeded from `schema.sql` + `data.sql` |
 
-All three are on the Docker network **`NetCogitia`** (DNS aliases `cogitia-frontend`,
-`cogitia-backend`, `cogitia-database`). The database is deliberately **not published** on the
+All four are on the Docker network **`NetCogitia`** (DNS aliases `cogitia-frontend`,
+`cogitia-backend`, `cogitia-models`, `cogitia-database`). `Cogitia-Models` is, like the database,
+**not published** on the host: only the Back-End calls it. The database is deliberately **not published** on the
 host. It is the third container agreed on top of the original two-container spec, because the
 Back-End cannot run without PostgreSQL.
 
@@ -122,12 +126,12 @@ type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh root@95.217.14.18 "cat >> ~/.ssh
 ## Local deployment
 
 ```powershell
-.\deploy-local.ps1              # full build (first run ~5 min: torch CPU + Whisper model)
+.\deploy-local.ps1              # full build (first run ~5-10 min: torch CPU + Whisper + Laya weights in cogitia-models)
 .\deploy-local.ps1 -SkipBuild   # redeploy existing images
 .\deploy-local.ps1 -NoCache     # clean rebuild
 ```
 
-Phases: prerequisites → build (3 images) → runtime config (`.runtime\local`) → DB backup
+Phases: prerequisites → build (4 images) → runtime config (`.runtime\local`) → DB backup
 (`backups\local`, last 5 kept) → `NetCogitia` → stray containers removed → `compose up -d`
 (only changed containers are recreated, volumes kept) → wait healthy → verification →
 label-scoped removal of dangling Cogitia images. Idempotent: re-running converges to the same
@@ -135,8 +139,8 @@ state.
 
 Verification: Front-End health/SPA/runtime API URL, Back-End OpenAPI, a **database-backed**
 endpoint (`/disciplines/db_check`), the **CORS preflight** the browser performs, all
-three containers on `NetCogitia`, FrontEnd→BackEnd and BackEnd→Database by container DNS,
-restart policy `unless-stopped`, database not published.
+five containers on `NetCogitia`, FrontEnd→BackEnd, BackEnd→Database, BackEnd→Models and Worker→Database by container DNS, worker ffmpeg,
+restart policy `unless-stopped`, database and models not published.
 
 ## Hetzner deployment
 
@@ -166,6 +170,31 @@ Any failure stops the run with exit code 1.
 2. `.\deploy-all.ps1`: containers up, HTTP vhost installed.
 3. `.\renew-certificates.ps1 -Issue -Email <you> -DryRun`, then without `-DryRun`.
 4. `.\deploy-all.ps1 -SkipBuild -SkipTransfer` (optional): re-verifies over HTTPS.
+
+## Cloned voices (optional Cogitia-Voice)
+
+`Cogitia-Voice` runs VibeVoice-1.5B: text-to-speech that imitates a voice from a 10-30 s sample.
+Authors store their voice in **Administration › IA › Voix** (sample recorded in the browser or
+uploaded, plus a consent statement) and pick it as a narration voice in the Creation Studio.
+
+It is **off by default** because it is heavy: image ~10 GB (weights 5.5 GB baked at a pinned
+revision), about 11.5 GB of RAM (limit `memory` 14g), and on CPU it is **much slower than real
+time**: measured 6.8 s of French audio in 125 s on 4 cores (~18x), so a 30 s narration takes about
+9 minutes. To turn it on:
+
+1. It follows the environment: `environments.<env>.optional_services` in `cogitia-registry.json`
+   lists it for **local** (on) and not for **production** (off, to spare the server's RAM). Add
+   `"voice"` to production's list to deploy it on Hetzner (adjust `services.voice.cpus` / `memory`).
+2. `.\deploy-local.ps1` (or `.\deploy-all.ps1`): the image is built, started under the compose
+   profile `voice`, and checked (Back-End -> Voice, not published).
+3. First start of the Back-End with the voice enabled seeds the deployment `vibevoice@voice` as
+   **active**, routed second on « Audio : narration » (Piper stays the default voice). If the stack
+   ran before with the voice off, activate `vibevoice@voice` in **Administration › IA › Modèles &
+   fournisseurs**.
+
+On a GPU host, build with `--build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu128` and give
+the container GPU access: synthesis becomes faster than real time. Nothing in the application names
+VibeVoice: any voice deployment whose settings declare `voice_cloning` receives the cloned voices.
 
 ## Changing an API key (no redeploy)
 

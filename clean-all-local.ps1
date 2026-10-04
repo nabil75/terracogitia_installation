@@ -59,7 +59,7 @@ try {
     Write-CogitiaBanner 'Terra-Cogitia -- Local Cleanup'
     $registry = if ($RegistryPath) { Get-CogitiaRegistry -Path $RegistryPath } else { Get-CogitiaRegistry }
     Assert-CogitiaDocker | Out-Null
-    $services   = @(Get-CogitiaServices $registry)
+    $services   = @(Get-CogitiaServices $registry -All)
     $containers = @($services | ForEach-Object { $_.Container })
     $volumes    = @($registry.services.database.volume, $registry.services.backend.volume)
 

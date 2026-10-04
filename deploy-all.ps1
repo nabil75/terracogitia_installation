@@ -108,11 +108,12 @@ try {
     # --- Phase 1: Validation -----------------------------------------------------
     Write-CogitiaPhase 'PHASE 1: Validation'
     $registry = if ($RegistryPath) { Get-CogitiaRegistry -Path $RegistryPath } else { Get-CogitiaRegistry }
+    Set-CogitiaActiveEnvironment $registry 'production'
     $prod = Get-CogitiaEnvironment $registry 'production'
     $server = $prod.server
     $deployDir = $server.deploy_dir
     $secrets = Read-CogitiaSecrets (Resolve-CogitiaPath $registry $prod.secrets_file) `
-        -Required @('POSTGRES_PASSWORD', 'MISTRAL_API_KEY') -Optional @('MISTRAL_MODEL', 'OPENAI_API_KEY')
+        -Required @('POSTGRES_PASSWORD', 'MISTRAL_API_KEY') -Optional @('MISTRAL_MODEL', 'OPENAI_API_KEY', 'MODELS_API_TOKEN', 'AUTH_SECRET', 'PEXELS_API_KEY', 'OPENVERSE_TOKEN')
     Write-CogitiaOk "Secrets loaded from $($prod.secrets_file)"
 
     $services = @(Get-CogitiaServices $registry)
@@ -167,7 +168,9 @@ try {
     $files = New-CogitiaRuntimeFiles -Registry $registry -EnvironmentName 'production' -OutDir $stagingDir -Secrets $secrets
     Send-CogitiaFile $session $files.Database "$deployDir/secrets/database.env"
     Send-CogitiaFile $session $files.Backend  "$deployDir/secrets/backend.env"
-    Invoke-CogitiaRemote $session "chmod 700 $deployDir/secrets && chmod 600 $deployDir/secrets/database.env $deployDir/secrets/backend.env" -Quiet | Out-Null
+    Send-CogitiaFile $session $files.Models   "$deployDir/secrets/models.env"
+    Send-CogitiaFile $session $files.Voice    "$deployDir/secrets/voice.env"
+    Invoke-CogitiaRemote $session "chmod 700 $deployDir/secrets && chmod 600 $deployDir/secrets/database.env $deployDir/secrets/backend.env $deployDir/secrets/models.env $deployDir/secrets/voice.env" -Quiet | Out-Null
     Remove-Item (Split-Path -Parent $files.Database) -Recurse -Force
     Write-CogitiaOk "Secrets uploaded to $deployDir/secrets (chmod 600; local staging copy deleted)"
 

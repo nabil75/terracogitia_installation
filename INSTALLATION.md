@@ -8,7 +8,7 @@ for troubleshooting and background, see [README.md](README.md).
 
 | Script | Target | Purpose |
 |---|---|---|
-| [`deploy-local.ps1`](#deploy-localps1) | Your PC (Docker Desktop) | Build and (re)deploy the three containers, then verify |
+| [`deploy-local.ps1`](#deploy-localps1) | Your PC (Docker Desktop) | Build and (re)deploy the five containers, then verify |
 | [`db-access.ps1`](#db-accessps1) | Your PC | Browse the local PostgreSQL (Adminer UI, `psql`, or TCP tunnel) |
 | [`clean-all-local.ps1`](#clean-all-localps1) | Your PC | Remove the local deployment |
 | [`deploy-all.ps1`](#deploy-allps1) | Hetzner | Build → export → transfer → deploy → verify |

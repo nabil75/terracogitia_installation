@@ -26,7 +26,39 @@
       "build_context": "../terracogitia_backend/data",
       "container_port": 5432,
       "volume": "cogitia-database-data",
-      "required_files": ["schema.sql", "data.sql"]
+      "required_files": [
+        "schema.sql",
+        "data.sql"
+      ]
+    },
+    "models": {
+      "container_name": "Cogitia-Models",
+      "alias": "cogitia-models",
+      "image_name": "cogitia-models",
+      "dockerfile": "docker/models.Dockerfile",
+      "build_context": "../terracogitia_backend/model_server",
+      "container_port": 8300,
+      "health_path": "/health",
+      "required_files": [
+        "app.py",
+        "requirements.txt"
+      ]
+    },
+    "voice": {
+      "optional": true,
+      "container_name": "Cogitia-Voice",
+      "alias": "cogitia-voice",
+      "image_name": "cogitia-voice",
+      "dockerfile": "docker/voice.Dockerfile",
+      "build_context": "../terracogitia_backend/voice_server",
+      "container_port": 8400,
+      "health_path": "/health",
+      "cpus": "4.0",
+      "memory": "14g",
+      "required_files": [
+        "app.py",
+        "requirements.txt"
+      ]
     },
     "backend": {
       "container_name": "Cogitia-BackEnd",
@@ -39,7 +71,27 @@
       "volume": "cogitia-backend-data",
       "health_path": "/openapi.json",
       "db_check_path": "/disciplines/db_check",
-      "required_files": ["main.py", "config.py", "database.py", "requirements.txt"]
+      "required_files": [
+        "main.py",
+        "config.py",
+        "database.py",
+        "requirements.txt"
+      ],
+      "build_target": "api"
+    },
+    "worker": {
+      "container_name": "Cogitia-Worker",
+      "alias": "cogitia-worker",
+      "image_name": "cogitia-worker",
+      "dockerfile": "docker/backend.Dockerfile",
+      "build_target": "worker",
+      "build_context": "../terracogitia_backend",
+      "pools": "light,provider,render",
+      "cpus": "2.0",
+      "required_files": [
+        "media/worker.py",
+        "requirements.txt"
+      ]
     },
     "frontend": {
       "container_name": "Cogitia-FrontEnd",
@@ -50,12 +102,21 @@
       "port": 8200,
       "container_port": 8200,
       "health_path": "/healthz",
-      "required_files": ["package.json", "package-lock.json", "angular.json", "src/index.html", "src/assets/env.js"]
+      "required_files": [
+        "package.json",
+        "package-lock.json",
+        "angular.json",
+        "src/index.html",
+        "src/assets/env.js"
+      ]
     }
   },
   "environments": {
     "local": {
       "secrets_file": "secrets.local.env",
+      "optional_services": [
+        "voice"
+      ],
       "bind_address": "127.0.0.1",
       "frontend_url": "http://localhost:8200",
       "api_base_url": "http://localhost:8201",
@@ -68,6 +129,7 @@
     },
     "production": {
       "secrets_file": "secrets.prod.env",
+      "optional_services": [],
       "bind_address": "0.0.0.0",
       "server": {
         "host": "95.217.14.18",

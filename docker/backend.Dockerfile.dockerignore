@@ -22,3 +22,5 @@ run_dev.py
 pytest.ini
 **/*.log
 **/*.jsonl
+# Model server: built separately (models.Dockerfile)
+model_server

@@ -52,13 +52,24 @@ load_env() {
     local v
     for v in COMPOSE_PROJECT_NAME NETWORK_NAME IMAGE_LABEL \
              DATABASE_IMAGE DATABASE_CONTAINER DATABASE_ALIAS DATABASE_VOLUME \
+             MODELS_IMAGE MODELS_CONTAINER MODELS_ALIAS MODELS_PORT MODELS_HEALTH_PATH \
              BACKEND_IMAGE BACKEND_CONTAINER BACKEND_ALIAS BACKEND_VOLUME BACKEND_PORT BACKEND_HEALTH_PATH BACKEND_DB_CHECK_PATH \
+             WORKER_IMAGE WORKER_CONTAINER WORKER_ALIAS WORKER_POOLS WORKER_CPUS \
              FRONTEND_IMAGE FRONTEND_CONTAINER FRONTEND_ALIAS FRONTEND_PORT FRONTEND_HEALTH_PATH \
              POSTGRES_DB POSTGRES_USER BIND_ADDRESS API_BASE_URL CORS_ORIGINS; do
         [[ -n "${!v:-}" ]] || die "$v is not set in $ENV_FILE"
     done
-    CONTAINERS=("$DATABASE_CONTAINER" "$BACKEND_CONTAINER" "$FRONTEND_CONTAINER")
-    IMAGES=("$DATABASE_IMAGE" "$BACKEND_IMAGE" "$FRONTEND_IMAGE")
+    CONTAINERS=("$DATABASE_CONTAINER" "$MODELS_CONTAINER" "$BACKEND_CONTAINER" "$WORKER_CONTAINER" "$FRONTEND_CONTAINER")
+    IMAGES=("$DATABASE_IMAGE" "$MODELS_IMAGE" "$BACKEND_IMAGE" "$WORKER_IMAGE" "$FRONTEND_IMAGE")
+    # Optional Cogitia-Voice (profile « voice »): deployed and checked only when enabled; always cleaned.
+    VOICE_ON=false
+    if [[ "${VOICE_ENABLED:-0}" == "1" ]]; then
+        VOICE_ON=true
+        CONTAINERS+=("$VOICE_CONTAINER")
+        IMAGES+=("$VOICE_IMAGE")
+    fi
+    ALL_CONTAINERS=("${CONTAINERS[@]}")
+    $VOICE_ON || [[ -z "${VOICE_CONTAINER:-}" ]] || ALL_CONTAINERS+=("$VOICE_CONTAINER")
     VOLUMES=("$DATABASE_VOLUME" "$BACKEND_VOLUME")
 }
 
@@ -96,6 +107,32 @@ backup_database() {
     fi
     # shellcheck disable=SC2012
     ls -1t "$BACKUP_DIR"/cogitia_*.dump 2>/dev/null | tail -n +$((BACKUP_KEEP + 1)) | xargs -r rm -f
+}
+
+backup_media() {
+    # Media files (Creation Studio) live in the Back-End volume under /data/media; the database
+    # rows and the files must be restorable together, so both are backed up with the same tag.
+    local tag="${1:-predeploy}"
+    if ! docker volume inspect "$BACKEND_VOLUME" >/dev/null 2>&1; then
+        log "Media backup skipped: volume $BACKEND_VOLUME absent (first deployment?)"
+        return 0
+    fi
+    if ! docker image inspect "$BACKEND_IMAGE" >/dev/null 2>&1; then
+        warn "Media backup skipped: image $BACKEND_IMAGE not present yet"
+        return 0
+    fi
+    mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
+    local name="cogitia_media_${tag}_$(date +%Y%m%d_%H%M%S).tgz"
+    if docker run --rm --user 0 --entrypoint sh -v "$BACKEND_VOLUME:/data:ro" -v "$BACKUP_DIR:/backup" "$BACKEND_IMAGE" \
+        -c "if [ -d /data/media ]; then tar czf /backup/$name -C /data media; else echo none; fi" | grep -q none; then
+        log "Media backup skipped: no media yet"
+    elif [[ -f "$BACKUP_DIR/$name" ]]; then
+        ok "Media backup: $BACKUP_DIR/$name ($(stat -c%s "$BACKUP_DIR/$name") bytes)"
+    else
+        die "Media backup failed -- aborting to protect data"
+    fi
+    # shellcheck disable=SC2012
+    ls -1t "$BACKUP_DIR"/cogitia_media_*.tgz 2>/dev/null | tail -n +$((BACKUP_KEEP + 1)) | xargs -r rm -f
 }
 
 ensure_network() {
@@ -198,6 +235,13 @@ chk_restart() {
     done
 }
 chk_db_private() { [[ -z "$(docker port "$DATABASE_CONTAINER" 2>/dev/null)" ]]; }
+chk_be_to_models() { docker exec "$BACKEND_CONTAINER" python -c "import urllib.request; urllib.request.urlopen('http://$MODELS_ALIAS:$MODELS_PORT$MODELS_HEALTH_PATH', timeout=10)"; }
+chk_models_private() { [[ -z "$(docker port "$MODELS_CONTAINER" 2>/dev/null)" ]]; }
+chk_worker_to_db() { docker exec "$WORKER_CONTAINER" python -c "import socket; socket.create_connection(('$DATABASE_ALIAS', 5432), 5)"; }
+chk_worker_ffmpeg() { docker exec "$WORKER_CONTAINER" ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264; }
+chk_worker_private() { [[ -z "$(docker port "$WORKER_CONTAINER" 2>/dev/null)" ]]; }
+chk_be_to_voice() { docker exec "$BACKEND_CONTAINER" python -c "import urllib.request; urllib.request.urlopen('http://$VOICE_ALIAS:$VOICE_PORT$VOICE_HEALTH_PATH', timeout=10)"; }
+chk_voice_private() { [[ -z "$(docker port "$VOICE_CONTAINER" 2>/dev/null)" ]]; }
 
 verify() {
     FAILURES=0
@@ -210,8 +254,17 @@ verify() {
     check "All containers on       $NETWORK_NAME" chk_network
     check "Front-End -> Back-End   http://$BACKEND_ALIAS:8201 (NetCogitia DNS)" chk_fe_to_be
     check "Back-End -> Database    $DATABASE_ALIAS:5432 (NetCogitia DNS)" chk_be_to_db
+    check "Back-End -> Models      http://$MODELS_ALIAS:$MODELS_PORT$MODELS_HEALTH_PATH (NetCogitia DNS)" chk_be_to_models
     check "Restart policy          unless-stopped" chk_restart
     check "Database not published  (internal only)" chk_db_private
+    check "Models not published    (internal only)" chk_models_private
+    check "Worker -> Database      $DATABASE_ALIAS:5432 (NetCogitia DNS)" chk_worker_to_db
+    check "Worker ffmpeg           libx264 available" chk_worker_ffmpeg
+    check "Worker not published    (internal only)" chk_worker_private
+    if $VOICE_ON; then
+        check "Back-End -> Voice       http://$VOICE_ALIAS:$VOICE_PORT$VOICE_HEALTH_PATH (NetCogitia DNS)" chk_be_to_voice
+        check "Voice not published     (internal only)" chk_voice_private
+    fi
     [[ $FAILURES -eq 0 ]] || die "$FAILURES verification check(s) failed"
 }
 
@@ -259,6 +312,7 @@ cmd_deploy() {
 
     header "Database backup"
     backup_database predeploy
+    backup_media predeploy
 
     header "Network"
     ensure_network
@@ -302,10 +356,10 @@ cmd_clean() {
     load_env
 
     header "Cleaning Terra-Cogitia"
-    if $purge_data; then backup_database prepurge; fi
+    if $purge_data; then backup_database prepurge; backup_media prepurge; fi
 
     local c v members ids
-    for c in "${CONTAINERS[@]}"; do
+    for c in "${ALL_CONTAINERS[@]}"; do
         if container_exists "$c"; then docker rm -f "$c" >/dev/null; ok "container $c removed"; else log "container $c -- not present"; fi
     done
 
@@ -347,7 +401,7 @@ cmd_clean() {
 
     header "Verification"
     FAILURES=0
-    for c in "${CONTAINERS[@]}"; do check "container $c absent" bash -c "! docker container inspect '$c'"; done
+    for c in "${ALL_CONTAINERS[@]}"; do check "container $c absent" bash -c "! docker container inspect '$c'"; done
     if ! $keep_images; then
         check "Terra-Cogitia images absent" bash -c "[[ -z \"\$(docker images -q --filter 'label=$IMAGE_LABEL')\" ]]"
     fi
@@ -513,7 +567,7 @@ case "$command" in
     clean)       cmd_clean "$@" ;;
     apply-secrets) cmd_apply_secrets ;;
     status)      require_docker; load_env; status ;;
-    backup)      require_docker; load_env; backup_database manual ;;
+    backup)      require_docker; load_env; backup_database manual; backup_media manual ;;
     nginx)       cmd_nginx ;;
     cert-status) cmd_cert_status ;;
     cert-issue)  cmd_cert_issue "$@" ;;

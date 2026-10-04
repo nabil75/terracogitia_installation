@@ -3,20 +3,25 @@
 How the Terra-Cogitia containers are built, wired together and reached, locally (Docker Desktop)
 and in production (Hetzner). For the commands, see [INSTALLATION.md](INSTALLATION.md).
 
-## 1. The three containers
+## 1. The five containers
 
 | Container | Image | Built from | Listens on (inside) | Published on the host | Role |
 |---|---|---|---|---|---|
 | `Cogitia-FrontEnd` | `cogitia-frontend` | `terracogitia_frontend` (Angular 19) | `8200` | `8200` | Serves the compiled SPA (unprivileged nginx) |
-| `Cogitia-BackEnd` | `cogitia-backend` | `terracogitia_backend` (FastAPI) | `8201` | `8201` | REST API: disciplines, themes, questions, challenges, auth, Whisper transcription, Mistral AI |
+| `Cogitia-BackEnd` | `cogitia-backend` | `terracogitia_backend` (FastAPI) | `8201` | `8201` | REST API: disciplines, themes, questions, challenges, auth, AI layer (routing, prompts, metering, administration) |
+| `Cogitia-Models` | `cogitia-models` | `terracogitia_backend/model_server` (FastAPI) | `8300` | **not published** | Open-weight models served to the Back-End: **Laya** (decision model, `POST /v1/decide`), **Whisper** (speech-to-text, `POST /v1/audio/transcriptions`) and **Piper voices** (text-to-speech, `POST /v1/audio/speech`; voice list set by the `PIPER_VOICES` build argument) |
+| `Cogitia-Worker` | `cogitia-worker` | `terracogitia_backend` (same code as the Back-End, `--target worker`, adds ffmpeg) | — | **not published** | Media jobs pulled from the PostgreSQL queue: upload processing, transcoding, bank imports, AI generation calls, ffmpeg composition. Scales by replicas. |
 | `Cogitia-Database` | `cogitia-database` | `terracogitia_backend/data` (`schema.sql`, `data.sql`) | `5432` | **not published** | PostgreSQL 17, database `terracogitia` |
+| `Cogitia-Voice` *(optional)* | `cogitia-voice` | `terracogitia_backend/voice_server` (FastAPI, VibeVoice-1.5B) | `8400` | **not published** | Text-to-speech with **voice cloning**: `POST /v1/audio/speech` (OpenAI-compatible + `reference_audio`). Started only in the environments listing it in `optional_services` (local by default; compose profile `voice`). Separate from Models so a slow synthesis never delays Laya or Whisper. |
 
-All three are on one user-defined Docker network, **`NetCogitia`**, and each has a stable DNS alias on it:
+All five are on one user-defined Docker network, **`NetCogitia`**, and each has a stable DNS alias on it:
 
 | Container | DNS name on `NetCogitia` |
 |---|---|
 | `Cogitia-FrontEnd` | `cogitia-frontend` |
 | `Cogitia-BackEnd` | `cogitia-backend` |
+| `Cogitia-Models` | `cogitia-models` |
+| `Cogitia-Worker` | `cogitia-worker` |
 | `Cogitia-Database` | `cogitia-database` |
 
 Every name, port and alias is defined once, in [cogitia-registry.json](cogitia-registry.json).
@@ -47,6 +52,7 @@ flowchart LR
             FE["Cogitia-FrontEnd<br/>nginx :8200<br/>alias cogitia-frontend"]
             BE["Cogitia-BackEnd<br/>uvicorn :8201<br/>alias cogitia-backend"]
             DB[("Cogitia-Database<br/>PostgreSQL :5432<br/>alias cogitia-database")]
+            MO["Cogitia-Models<br/>uvicorn :8300<br/>Laya · Whisper<br/>alias cogitia-models"]
         end
     end
 
@@ -56,6 +62,7 @@ flowchart LR
     SPA -- "2. REST calls + CORS<br/>(host :8201)" --> BE
     BE -- "3. SQL (asyncpg)<br/>cogitia-database:5432" --> DB
     BE -- "4. HTTPS (AI generation)" --> Mistral
+    BE -- "5. HTTP (decisions, transcription)<br/>cogitia-models:8300" --> MO
 ```
 
 ## 3. Communication paths
@@ -66,10 +73,22 @@ flowchart LR
 | 2 | Browser → Back-End | HTTP(S) + CORS, via the host port | `http://localhost:8201` / `https://api.terra-cogitia.com` | The address comes from `assets/env.js` |
 | 3 | Back-End → Database | PostgreSQL protocol on `NetCogitia` | `cogitia-database:5432` | Container-to-container; the only path to the database |
 | 4 | Back-End → Mistral | HTTPS, outbound to the internet | `api.mistral.ai` | Needs `MISTRAL_API_KEY` |
+| 5 | Back-End → Models | HTTP on `NetCogitia` | `http://cogitia-models:8300/v1` (`AI_MODELS_URL`) | Container-to-container only; optional shared token `MODELS_API_TOKEN` |
 | — | Front-End → Back-End | Possible on `NetCogitia` (`http://cogitia-backend:8201`) | — | **Not used by the application**; the scripts only test it to confirm the network works |
 
-Speech-to-text (Whisper, `base` model) runs **inside** `Cogitia-BackEnd` on the CPU. The model is
-baked into the image, so transcription needs no network access.
+Open-weight models run in **`Cogitia-Models`**, not in the Back-End, so CPU-heavy inference never
+competes with API requests and the Back-End image stays small (~250 MB instead of ~2 GB):
+
+- **Laya** (Convai Innovations, Apache-2.0) — a *decision* model, open alternative to JEV: a state plus
+  typed questions (`choice` / `score` / `noul`) in, typed answers with probabilities out.
+  Checkpoint `multilingual` (mmBERT-base, 322M parameters, 100+ languages), pinned commit `LAYA_REVISION`.
+- **Whisper** (`base`, MIT) — speech-to-text, OpenAI-compatible endpoint.
+
+Weights are downloaded **at build time** at pinned revisions and baked into the image; the container runs
+**offline** (`HF_HUB_OFFLINE=1`) and is reachable only from `NetCogitia`. The Back-End reaches it through
+its AI layer (providers « Cogitia-Models » in *Administration › IA*), so a model can later move to a GPU
+host or be replaced by a hosted service by configuration. To add a checkpoint, rebuild with
+`--build-arg LAYA_MODELS=multilingual,english` (or `WHISPER_MODELS=base,small`).
 
 ### How the SPA learns the API address (runtime configuration)
 
@@ -133,7 +152,22 @@ To serve production **only** through nginx, set `bind_address` to `127.0.0.1` in
 the scripts then skip the direct-port checks.
 
 The host nginx (`/etc/nginx/.../terra-cogitia.conf`) redirects HTTP to HTTPS and allows 25 MB uploads
-(audio) and 900 s timeouts on the API (long Mistral generations).
+(audio) and 900 s timeouts on the API (long Mistral generations). `location /media/uploads` allows
+210 MB (video uploads from the Creation Studio) and streams the body to the API without buffering.
+
+**Media worker.** `Cogitia-Worker` shares the Back-End's code, secrets and `backend-data` volume
+(media files under `/data/media`), but runs `python -m media.worker` instead of the API. It serves
+three job pools (`light`, `provider`, `render`, registry `services.worker.pools`) under a CPU limit
+(`services.worker.cpus`), so ffmpeg encoding cannot starve the API or Cogitia-Models. More replicas
+can be added without coordination (jobs are claimed with `FOR UPDATE SKIP LOCKED`); running workers on
+another host requires moving media files to object storage first. Its health check is a heartbeat file
+refreshed every 10 s. API access tokens and media links are signed with `AUTH_SECRET`
+(`secrets.<env>.env`, shared by the Back-End and the Worker).
+
+**Cloned voices (optional).** `Cogitia-Voice` holds no state: voice samples live in the Back-End
+(`/data/voices`, table `ai_voice_profile` with the consent record) and are sent with each synthesis
+request by the Worker. The Back-End reaches it at `AI_VOICE_URL`; `AI_VOICE_ENABLED` seeds the
+`vibevoice@voice` deployment as active. It shares the optional `MODELS_API_TOKEN` (`secrets/voice.env`).
 
 ## 5. Data and persistence
 
@@ -187,25 +221,28 @@ flowchart LR
 - `Cogitia-BackEnd` starts **only after** `Cogitia-Database` is healthy. At startup it opens the
   connection pool and runs its migrations. If the database is unreachable it exits, and Docker restarts it.
 - `Cogitia-FrontEnd` is independent: it only serves files.
-- Restart policy: **`unless-stopped`** on all three. A crash, or a reboot of the host, brings the
+- Restart policy: **`unless-stopped`** on all four. A crash, or a reboot of the host, brings the
   container back; a deliberate `docker stop` keeps it stopped.
 
 | Container | Health check | Grace period |
 |---|---|---|
 | `Cogitia-Database` | `pg_isready` | 120 s (first start includes seeding) |
 | `Cogitia-BackEnd` | `GET http://127.0.0.1:8201/openapi.json` | 120 s |
+| `Cogitia-Models` | `GET http://127.0.0.1:8300/health` | 180 s (models preloaded at start, ~15 s) |
 | `Cogitia-FrontEnd` | `GET http://127.0.0.1:8200/healthz` | 10 s |
 
 ## 8. Security boundaries
 
-- **The database is not published on the host**: only containers on `NetCogitia` can reach it.
-- `Cogitia-FrontEnd` runs nginx as a non-root user; `Cogitia-BackEnd` runs as user `app` (UID 10001).
-- Images contain no build tools, tests or secrets. The Back-End uses CPU-only PyTorch and has the
-  GPU-only `triton` package removed.
+- **The database and Cogitia-Models are not published on the host**: only containers on `NetCogitia`
+  can reach them. Cogitia-Models also accepts an optional shared token (`MODELS_API_TOKEN`) and runs
+  offline with pinned, baked-in weights (no runtime download).
+- `Cogitia-FrontEnd` runs nginx as a non-root user; `Cogitia-BackEnd` runs as user `app` (UID 10001); `Cogitia-Models` as user `models` (UID 10002).
+- Images contain no build tools, tests or secrets. Only Cogitia-Models contains PyTorch (CPU-only, GPU-only
+  `triton` removed); the Back-End no longer ships any ML library.
 - Locally, the ports are bound to `127.0.0.1`. In production, public traffic goes through TLS on the host
   nginx. Note that Docker-published ports bypass `ufw`: use the Hetzner Cloud firewall to restrict 8200/8201.
 - **Isolation from other projects:** every script touches only resources named in the registry
-  (the three container names, `NetCogitia`, the two volumes) or labelled
+  (the four container names, `NetCogitia`, the two volumes) or labelled
   `com.terra-cogitia.project=cogitia` (images). There is no global `docker prune`, so PlanningPowerTools
   and any other containers on the same host are never affected.
 
